@@ -22,15 +22,12 @@ void check_network_security()
     char output[1024];
     int is_public = 0;
 
-    printf("Checking Network Security Profile\n");
+    printf("[SYSTEM] Checking network security profile...\n");
 
-    fp = _popen(
-        "powershell -Command \"Get-NetConnectionProfile | Select-Object -ExpandProperty NetworkCategory\"",
-        "r"
-    );
+    fp = _popen("powershell -Command \"Get-NetConnectionProfile | Select-Object -ExpandProperty NetworkCategory\"", "r");
 
     if (fp == NULL) {
-        printf("Could not check network profile.\n");
+        printf("[ERROR] Could not check network profile.\n");
         return;
     }
 
@@ -43,178 +40,203 @@ void check_network_security()
     _pclose(fp);
 
     if (is_public) {
-        printf("Public network is detected, please change the network type to private in system settings\n");
+        printf("[WARN] Public network detected. Discovery may be blocked.\n");
+        printf("       Please change the network type to Private in Windows settings.\n");
     } else {
-        printf("Network is Private. Discovery should work.\n");
+        printf("[SUCCESS] Network is Private. Ready for discovery.\n");
     }
 }
 
-DWORD WINAPI recv_thread(LPVOID arg)
+bool is_connected = true;
+
+DWORD WINAPI receive_thread(LPVOID arg)
 {
-    SOCKET sock = (SOCKET) arg;
-    char buf[BUFLEN];
+    SOCKET socket = (SOCKET)arg;
+    char buffer[BUFLEN];
     
-    while (1) {
-        memset(buf, 0, BUFLEN);
-        int n = recv(sock, buf, BUFLEN - 1, 0);
-        if (n <= 0) {
-            printf("\nDisconnected from server\n");
+    while (is_connected) {
+        memset(buffer, 0, BUFLEN);
+        int bytes_received = recv(socket, buffer, BUFLEN - 1, 0);
+        if (bytes_received <= 0) {
+            if (is_connected) {
+                printf("\n[DISCONNECT] Connection lost to server.\n");
+                is_connected = false;
+            }
             break;
         }
-        buf[n] = '\0';
+        buffer[bytes_received] = '\0';
         
-        printf("\r%s\n> ", buf); 
+        printf("\r%s\n[You] > ", buffer); 
+        fflush(stdout);
     }
     return 0;
 }
 
 int main(int argc, char *argv[])
 {
+    printf("=== LAN CHATROOM CLIENT ===\n\n");
     check_network_security();
 
-    WSADATA wsaData;
-    if (WSAStartup(MAKEWORD(2, 2), &wsaData) != 0) {
-        printf("Failed to init winsock\n");
+    WSADATA wsa_data;
+    if (WSAStartup(MAKEWORD(2, 2), &wsa_data) != 0) {
+        printf("[FATAL] Winsock initialization failed.\n");
         return 1;
     }
 
-    char serverip[INET_ADDRSTRLEN];
-    memset(serverip, 0, INET_ADDRSTRLEN);
+    char server_ip[INET_ADDRSTRLEN];
+    memset(server_ip, 0, INET_ADDRSTRLEN);
     bool ip_found = false;
 
     if (argc > 1) {
-        strncpy(serverip, argv[1], INET_ADDRSTRLEN - 1);
-        printf("Using Server IP from argument: %s\n", serverip);
+        strncpy(server_ip, argv[1], INET_ADDRSTRLEN - 1);
+        printf("[INFO] Using server IP from argument: %s\n", server_ip);
         ip_found = true;
     } else {
-        printf("Looking for server via UDP Broadcast...\n");
+        printf("[UDP] Looking for server via broadcast...\n");
 
-        SOCKET UDPSocket = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
-        if (UDPSocket == INVALID_SOCKET) {
-             printf("UDP Socket creation failed: %d\n", WSAGetLastError());
+        SOCKET udp_socket = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+        if (udp_socket == INVALID_SOCKET) {
+             printf("[ERROR] UDP socket creation failed: %d\n", WSAGetLastError());
         } else {
             int reuse = 1;
-            if (setsockopt(UDPSocket, SOL_SOCKET, SO_REUSEADDR, (char*)&reuse, sizeof(reuse)) < 0) {
-                printf("SO_REUSEADDR failed: %d\n", WSAGetLastError());
-            }
+            setsockopt(udp_socket, SOL_SOCKET, SO_REUSEADDR, (char*)&reuse, sizeof(reuse));
 
             DWORD timeout = 3000;
-            if (setsockopt(UDPSocket, SOL_SOCKET, SO_RCVTIMEO, (const char*)&timeout, sizeof(timeout)) < 0) {
-                 printf("SO_RCVTIMEO failed\n");
-            }
+            setsockopt(udp_socket, SOL_SOCKET, SO_RCVTIMEO, (const char*)&timeout, sizeof(timeout));
 
-            struct sockaddr_in listenaddr;
-            struct sockaddr_in sender;
-            memset(&listenaddr, 0, sizeof(listenaddr));
+            struct sockaddr_in listen_addr;
+            struct sockaddr_in sender_addr;
+            memset(&listen_addr, 0, sizeof(listen_addr));
 
-            listenaddr.sin_family = AF_INET;
-            listenaddr.sin_port = htons(UDP_PORT);
-            listenaddr.sin_addr.s_addr = INADDR_ANY;
+            listen_addr.sin_family = AF_INET;
+            listen_addr.sin_port = htons(UDP_PORT);
+            listen_addr.sin_addr.s_addr = INADDR_ANY;
 
-            if (bind(UDPSocket, (struct sockaddr*) &listenaddr, sizeof(listenaddr)) == SOCKET_ERROR) {
-                 printf("UDP Bind failed %d\n", WSAGetLastError());
+            if (bind(udp_socket, (struct sockaddr*)&listen_addr, sizeof(listen_addr)) == SOCKET_ERROR) {
+                 printf("[ERROR] UDP bind failed: %d\n", WSAGetLastError());
             } else {
-                 char udpbuffer[128];
-                 int senderlength = sizeof(sender);
-                 printf("Listening for server signal\n");
+                 char udp_buffer[128];
+                 int sender_length = sizeof(sender_addr);
+                 printf("[UDP] Listening for server signal...\n");
                  
-                 int recieved = recvfrom(UDPSocket, udpbuffer, sizeof(udpbuffer) - 1, 0, (struct sockaddr*) &sender, &senderlength);
+                 int bytes_received = recvfrom(udp_socket, udp_buffer, sizeof(udp_buffer) - 1, 0,
+                                              (struct sockaddr*)&sender_addr, &sender_length);
 
-                 if (recieved > 0) {
-                     udpbuffer[recieved] = '\0';
-                     printf("Discovered server: %s\n", udpbuffer);
-                     inet_ntop(AF_INET, &sender.sin_addr, serverip, sizeof(serverip));
-                     printf("Server IP: %s\n", serverip);
-                     ip_found = true;
+                 if (bytes_received > 0) {
+                     udp_buffer[bytes_received] = '\0';
+                     if (strstr(udp_buffer, "CHAT_SERVER") != NULL) {
+                        printf("[UDP] Discovered server: %s\n", udp_buffer);
+                        inet_ntop(AF_INET, &sender_addr.sin_addr, server_ip, sizeof(server_ip));
+                        printf("[UDP] Server IP: %s\n", server_ip);
+                        ip_found = true;
+                     }
                  } else {
-                     printf("Discovery timed out. Server not found via UDP.\n");
+                     printf("[UDP] Discovery timed out.\n");
                  }
             }
-            closesocket(UDPSocket);
+            closesocket(udp_socket);
         }
     }
 
     if (!ip_found) {
-        while(true) {
-            printf("\nEnter Server IP manually: ");
-            fgets(serverip, sizeof(serverip), stdin);
-            serverip[strcspn(serverip, "\n")] = '\0';
+        while (true) {
+            printf("\nEnter server IP manually: ");
+            if (fgets(server_ip, sizeof(server_ip), stdin) == NULL) break;
+            server_ip[strcspn(server_ip, "\n")] = '\0';
 
-            if (strlen(serverip) > 6) break;
-            printf("Invalid IP. Try again\n");
+            struct sockaddr_in sa;
+            if (inet_pton(AF_INET, server_ip, &(sa.sin_addr)) == 1) break;
+            
+            printf("[ERROR] Invalid IPv4 address. Try again.\n");
         }
     }
 
-    SOCKET ConnectSocket = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-    if (ConnectSocket == INVALID_SOCKET) {
-        printf("TCP socket creation failed: %d\n", WSAGetLastError());
+    SOCKET tcp_socket = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    if (tcp_socket == INVALID_SOCKET) {
+        printf("[FATAL] TCP socket creation failed: %d\n", WSAGetLastError());
         WSACleanup();
         return 1;
     }
 
-    struct sockaddr_in server;
-    memset(&server, 0, sizeof(server));
-    server.sin_family = AF_INET;
-    server.sin_port = htons(PORT);
-    inet_pton(AF_INET, serverip, &server.sin_addr);
+    struct sockaddr_in server_addr;
+    memset(&server_addr, 0, sizeof(server_addr));
+    server_addr.sin_family = AF_INET;
+    server_addr.sin_port = htons(PORT);
+    inet_pton(AF_INET, server_ip, &server_addr.sin_addr);
 
-    printf("Connecting to %s\n", serverip);
-    if (connect(ConnectSocket, (struct sockaddr*) &server, sizeof(server)) == SOCKET_ERROR) {
-        printf("Failed to connect to server %d\n", WSAGetLastError());
-        closesocket(ConnectSocket);
+    printf("[TCP] Connecting to %s...\n", server_ip);
+    if (connect(tcp_socket, (struct sockaddr*)&server_addr, sizeof(server_addr)) == SOCKET_ERROR) {
+        printf("[FATAL] Connection failed: %d\n", WSAGetLastError());
+        closesocket(tcp_socket);
         WSACleanup();
         return 1;
     }
 
-    char username[32];
-    char verifyBuf[32];
+    char nickname[32];
+    char verify_buffer[64];
     
-    while(true) {
-        printf("Enter your name: ");
-        fgets(username, sizeof(username), stdin);
-        username[strcspn(username, "\n")] = '\0';
+    while (true) {
+        printf("Enter your nickname: ");
+        if (fgets(nickname, sizeof(nickname), stdin) == NULL) {
+            closesocket(tcp_socket);
+            WSACleanup();
+            return 0;
+        }
+        nickname[strcspn(nickname, "\r\n")] = '\0';
 
-        if (strlen(username) == 0) continue;
+        if (strlen(nickname) == 0) continue;
 
-        if (send(ConnectSocket, username, (int) strlen(username), 0) == SOCKET_ERROR) {
-            printf("Send failed: %d\n", WSAGetLastError());
-            break;
+        if (send(tcp_socket, nickname, (int)strlen(nickname), 0) == SOCKET_ERROR) {
+            printf("[ERROR] Send failed: %d\n", WSAGetLastError());
+            closesocket(tcp_socket);
+            WSACleanup();
+            return 1;
         }
 
-        int v = recv(ConnectSocket, verifyBuf, 32, 0);
-        if (v > 0) {
-            verifyBuf[v] = '\0';
-            if (strncmp(verifyBuf, "OK", 2) == 0) {
-                printf("Login accepted!\n\n");
+        memset(verify_buffer, 0, sizeof(verify_buffer));
+        int bytes_received = recv(tcp_socket, verify_buffer, sizeof(verify_buffer) - 1, 0);
+        if (bytes_received > 0) {
+            verify_buffer[bytes_received] = '\0';
+            if (strncmp(verify_buffer, "OK", 2) == 0) {
+                printf("[SUCCESS] Login accepted! Welcome to the chat.\n\n");
                 break;
+            } else if (strncmp(verify_buffer, "FULL", 4) == 0) {
+                printf("[REJECT] Server is full. Try again later.\n");
+                closesocket(tcp_socket);
+                WSACleanup();
+                return 0;
+            } else if (strncmp(verify_buffer, "NO", 2) == 0) {
+                printf("[REJECT] Nickname taken. Choose another.\n");
             } else {
-                printf("Server rejected name (name taken)\n");
+                printf("[ERROR] Server error: %s\n", verify_buffer);
             }
         } else {
-            printf("Server disconnected during login\n");
+            printf("[FATAL] Server disconnected during login.\n");
+            closesocket(tcp_socket);
+            WSACleanup();
             return 1;
         }
     }
 
-    CreateThread(NULL, 0, recv_thread, (LPVOID) ConnectSocket, 0, NULL);
+    CreateThread(NULL, 0, receive_thread, (LPVOID)tcp_socket, 0, NULL);
 
-    char buffer[BUFLEN];
-    while (true)
-    {
-        printf("> ");
-        fgets(buffer, BUFLEN, stdin);
+    char message_buffer[BUFLEN];
+    while (is_connected) {
+        printf("[You] > ");
+        if (fgets(message_buffer, BUFLEN, stdin) == NULL) break;
         
-        buffer[strcspn(buffer, "\n")] = '\0';
+        message_buffer[strcspn(message_buffer, "\r\n")] = '\0';
 
-        if (strlen(buffer) > 0) {
-            if (send(ConnectSocket, buffer, (int) strlen(buffer), 0) == SOCKET_ERROR) {
-                printf("Send failed\n");
+        if (strlen(message_buffer) > 0 && is_connected) {
+            if (send(tcp_socket, message_buffer, (int)strlen(message_buffer), 0) == SOCKET_ERROR) {
+                if (is_connected) printf("[ERROR] Send failed.\n");
                 break;
             }
         }
     }
 
-    closesocket(ConnectSocket);
+    is_connected = false;
+    closesocket(tcp_socket);
     WSACleanup();
     return 0;
 }
